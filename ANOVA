@@ -1,0 +1,845 @@
+# Reference: https://docs.google.com/document/d/1WFO6k8BaE2Toni41SFeuJ0-ch47AoBTnMYdKCTUdLQE/pub
+
+
+//Menu
+function onOpen()
+{
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var menuEntries = [{name: "Authorize", functionName:"authorize_"},
+                     {name: "One Way ANOVA", functionName: "oneWayANOVA_"},
+                     {name: "Two Way ANOVA", functionName: "twoWayAnova_"},
+                     {name: "Help and Info", functionName:"helpDialog_"}];
+  ss.addMenu("Statistics", menuEntries);
+}
+//Authorize
+function authorize_()
+{
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+  var farRight = sheet.getLastColumn();
+  sheet.getRange(1, farRight+1).setValue("");
+  //tests:
+  //var desk = anova(["one","two"],[2,2],[['x','x','x'],['x',[3.6,5,70],[15.6,5,1250]],['x', [6,5,190],[6.4,5,232]]]);
+  //for (var i = 0; i< desk.length; i++)
+  //{
+  //  Browser.msgBox(desk[i]);
+  //}
+}
+//Data Format checker?
+//find cells
+//Fill dataCells Array
+//using cellData
+//One Way ANOVA
+//Two Way ANOVA
+function twoWayAnova_()
+{
+  //open SpreadSheet
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+ 
+  var dim = [0,0];
+  var cellWidth = 1;
+  while (isCellEmpty_(sheet.getRange(1,2+cellWidth).getValue()))
+    cellWidth++;
+  while (!isCellEmpty_(sheet.getRange(1,2+cellWidth*dim[1]).getValue()))
+    dim[1]++;
+  var cellHeight = 1;
+  while (isCellEmpty_(sheet.getRange(2+cellHeight,1).getValue()))
+    cellHeight++;
+  while (!isCellEmpty_(sheet.getRange(2+cellHeight*dim[0],1).getValue()))
+    dim[0]++;
+  var cellData = [[]];
+  for(var j = 0; j<dim[0]; j++)
+  {
+    cellData[j+1] = [];//leave empty space for summary data
+    for(var i = 0; i<dim[1]; i++)
+    {
+      cellData[j+1][i+1] = cellData_(sheet.getRange(2+j*cellHeight, 2+i*cellWidth, cellHeight, cellWidth));
+    }
+  }
+ 
+   
+  //Print Table
+  var table = anova_(["Rows","Columns"], dim, cellData);
+ 
+  var tableX = sheet.getLastColumn()+1;
+  var tableRange = sheet.getRange(2, tableX+1,table.length,6);
+  tableRange.setValues(table);
+}
+//N Way ANOVA
+//Pairwise comparisons
+//General ANOVA Runner
+//takes dim.length = # factors, dim[i] = # of levels of factor i
+//cellData = dim[0]+1 x dim[1]+1 x ... array of cellData_ outputs
+//extra cells at the zeros for factorData_ output
+/* i.e.
+cellData = [
+[empt, empt, empt, empt],
+[empt, data, data, data],
+[empt, data, data, data]];
+dim = [3,2];
+*/
+function anova_(names, dim, cellData)
+{
+  var subgroups = [1]; //subgroups[0] is the total number of cells + summary cells
+  var df = [];
+  df[0] = 1;
+  for (var i = 0; i<dim.length; i++)
+  {
+    for (var j = 0; j<=i; j++)
+    {
+      subgroups[j] *= dim[i]+1;
+    }
+    subgroups[i+1] = 1;
+    df[0] *= dim[i];
+  }
+  //Fill summary stats in dataCells Array using factorData_
+  for(var i = 0; i< subgroups[0]; i++)
+  {
+    if (isSummaryCell_(i, subgroups))
+    {
+      setCell_(i, subgroups, cellData, factorData_(subset_(i, subgroups, cellData)));
+    }
+  }
+ 
+  //Find various SS and DF statisitics using sumSquares
+  var sumSqrs = sumSquares_(subgroups, dim, cellData);
+  //idea?:
+  //var df = sumSqrs[2];
+  //var sumSqrs = sumSqrs[1];
+ 
+  df[0] = getCell_(0, subgroups, cellData)[1] - df[0];//N - a*b*c*...
+  for (var i = 1; i< Math.pow(2, dim.length); i++)
+  {
+    df[i] = getDf_(i,dim);
+  }
+ 
+  //Build summary table using statTable
+  var table = [["Source", "DF", "SS", "MS", "F", "P"]];
+  var MSE = sumSqrs[0]/df[0];
+  var MS;
+  var F;
+  for(var i = 1; i < sumSqrs.length; i++)
+  {
+    MS = sumSqrs[i]/df[i];
+    F = MS/MSE;
+    table[i] = [getName_(i, names), df[i], sumSqrs[i], MS, F, Ftest(F, df[i],df[0])];
+  }
+  table[table.length] = ["Error", df[0], sumSqrs[0], MSE, "",""];
+  table[table.length] = ["Total", 0, 0, "", "", ""];
+  for (var i = 0; i< sumSqrs.length; i++)
+  {
+    table[table.length-1][2] += sumSqrs[i];
+    table[table.length-1][1] += df[i];
+  }
+ 
+  //output Table
+  return table;
+}
+function getDf_(index, dim)
+{
+  var df = 1;
+  var factor = 0;
+  while (index > 0)
+  {
+    if (index%2 == 1)
+    {
+      df *= dim[factor]-1;
+    }
+    index = Math.floor(index/2);
+    factor++;
+  }
+  return df;
+ 
+}
+function getName_(index, names)
+{
+  var name = "";
+  var factor = 0;
+  while (index > 0)
+  {
+    if (index%2 == 1)
+    {
+      name += "*" + names[factor];
+    }
+    index = Math.floor(index/2);
+    factor++;
+  }
+  return name.substring(1);
+}
+//Find SS by sum over all cells
+function sumSquares_(subgroups, dim, cellData)
+{
+  var sumsqr = []; //sum of squares. 2^dim.length. [0] = error term
+  // ? var df = []; //degrees of freedom
+  for (var i = 0; i< Math.pow(2, dim.length); i++)
+  {
+    sumsqr[i] = 0;
+  }
+  var summaryCells = [];
+  var modelVals = []; // [0] = grand mean, [1] main effect 1, [2] main effect 2, [3] cross effect 1x2 . etc.
+  var df = [];
+  var mask;
+  var curCell;
+  for (var i = 0; i < subgroups[0]; i++)
+  {
+    if (!isSummaryCell_(i, subgroups))//sum up SS for all data cells
+    {
+      mask = getMask_(i, subgroups);
+      for(var j = 0; j< Math.pow(2, dim.length); j++)
+      {
+        summaryCells[j] = getCell_(unMask_(maskProjection_(j, mask),subgroups), subgroups, cellData);
+        modelVals[j] = summaryCells[j][0];
+        for(var k = 0; k < j; k++)
+        {
+         
+          if(isSubMask_(k, j))
+          {
+            modelVals[j] -= modelVals[k]; //i.e.  (ab) = X(ab) - (X(a) - X) - (X(b) - X) - X
+          }
+        }
+      }
+      curCell = summaryCells[Math.pow(2, dim.length)-1];
+      for(var j = 1; j< Math.pow(2, dim.length); j++)
+      {
+        sumsqr[j] += Math.pow(modelVals[j], 2)*curCell[1];
+        //curCell[1] is the number of samples in the cell i.
+      }
+      sumsqr[0] += curCell[2] - curCell[1]*Math.pow(curCell[0],2);
+      //curCell[2] is the sum of squares of samples in cell i.
+      //This is the Error term
+    }
+  }
+  return sumsqr;  
+}
+function subset_(index, subgroups, dataCells)
+{
+  var mask = getMask_(index, subgroups);//mask is an array to identify what data to include in subset.
+  var subset = applyMask_(0, mask, dataCells);
+  return subset;
+}
+function applyMask_(factor, mask, dataSet)
+{
+  if (factor >= mask.length)//mask fully applied
+  {
+    return dataSet;
+  }
+  else if (mask[factor] != 0) //selecting out a subset
+  {
+    return applyMask_(factor+1, mask, dataSet[mask[factor]]);
+  }
+  else //take all values of this subscript
+  {
+    var retData = [];
+    for(var i = 1; i < dataSet.length; i++)//cut out summary values
+    {
+      retData[i-1] = applyMask_(factor+1, mask, dataSet[i]);
+    }
+    return retData;
+  }
+}
+function isSubMask_(sub, main)
+{
+  while (true)
+  {
+    if (sub == 0)
+      return true;
+    if (sub%2 == 1 && main%2 != 1)
+      return false;
+    else
+    {
+      sub = Math.floor(sub/2);
+      main = Math.floor(main/2);
+    }
+  }
+}
+function maskProjection_(j,mask)//gets the jth summary cell associated with 'mask' cell
+{
+  var proj = [];
+  for(var i = 0; i< mask.length; i++)
+  {
+    proj[i] = Math.floor(j % Math.pow(2, i+1) /Math.pow(2, i))*mask[i];
+  }
+  return proj;  
+}
+function getMask_(index, subgroups) //returns array telling which subset to take.
+{                                   //the mask is also just the index as a tuple.
+  var mask = [];
+  for(var i = 0; i<subgroups.length-1; i++)
+  {
+    mask[i] = Math.floor(index%subgroups[i]/subgroups[i+1]);
+  }
+  return mask;
+}
+function unMask_(mask, subgroups)
+{
+  var index = 0;
+  for(var i = 0; i<subgroups.length-1; i++)
+  {
+    index += mask[i]*subgroups[i+1];
+  }
+  return index;
+}
+function isSummaryCell_(index, subgroups)
+{
+  for(var i = 0; i<subgroups.length-1; i++)
+  {
+    if(index%subgroups[i]/subgroups[i+1] <1)// == 0 if they stayed as ints
+      return true;
+  }
+  return false;
+}
+function getCell_(index, subgroups, dataCells)
+{
+  var level = dataCells;
+  for (var j = 0; j<subgroups.length-1; j++)
+  {
+    level = level[Math.floor(index%subgroups[j]/subgroups[j+1])];
+  }
+  return level;  
+}
+function setCell_(index, subgroups, dataCells, cell)
+{
+  var level = dataCells;
+  for (var j = 0; j<subgroups.length-2; j++)
+  {
+    level = level[Math.floor(index%subgroups[j]/subgroups[j+1])];
+  }
+  level[index%subgroups[subgroups.length-2]] = cell;  
+}
+//matrix with dimensions I, J, ..., 3
+//last cell for row/column/subset statistics
+//[mean, number of entries, sum of squares]
+//cell data = [mean, number, sum of squares]
+function cellData_(cellRange)
+{
+  var data = [0,0,0];
+  var vals = cellRange.getValues();
+  for (var i = 0; i<cellRange.getWidth(); i++)
+  {
+    for (var j = 0; j<cellRange.getHeight(); j++)
+    {
+      if (!isCellEmpty_(vals[j][i]))
+      {
+        data[0] += vals[j][i];
+        data[1]++;
+        data[2] += Math.pow(vals[j][i],2);
+      }
+    }
+  }
+  data[0] = 1.0*data[0]/data[1];
+  return data;  
+}
+//factorData = [mean, number]
+function factorData_(dataCells)
+{
+  //find Dimension of dataset
+  var dim = [];
+  var level = dataCells;
+  while (level.length != undefined)
+  {
+    dim[dim.length] = level.length;
+    level = level[0];
+  }
+  dim.length--;//take off the last array which is the data for the cell.
+  //size variables for computing addresses.
+  var subgroups = [1]; //subgroups[0] is the total number of cells
+  for (var i = 0; i<dim.length; i++)
+  {
+    for (var j = 0; j<=i; j++)
+    {
+      subgroups[j] *= dim[i];
+    }
+    subgroups[i+1] = 1;
+  }
+  var data = [0,0];//return values
+  var cell;
+  for (var i = 0; i < subgroups[0]; i++)
+  {
+    if (i%dim[dim.length-1] == 0)
+    {
+      level = dataCells;
+      for (var j = 1; j<dim.length; j++)
+      {
+        level = level[i%subgroups[j-1]/subgroups[j]];
+      }
+    }
+    cell = level[i%dim[dim.length-1]];
+    data[0] += cell[0]*cell[1]; //total sum
+    data[1] += cell[1]; //total number of values
+  }
+  data[0] = 1.0*data[0]/data[1]; //total mean
+  return data;
+}
+//ANOVA
+//Creates a One Way ANOVA Table from data on active sheet
+//Assumed Data Format:
+//Row one contains the names of the factor levels
+//and each column contains the data for that factor,
+//starting at row 2.
+function oneWayANOVA_()
+{
+  //open SpreadSheet
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getActiveSheet();
+ 
+  //find I,J[i],N
+  var I = 0;
+  var J = [];
+  var N = 0;
+  var Jmax = 0;
+  while (!isCellEmpty_(sheet.getRange(1,I+1).getValue()))
+  {
+    J[I] = 0;
+    while (!isCellEmpty_(sheet.getRange(J[I]+2,I+1).getValue()))
+    {
+      J[I]++;
+      N++;
+    }
+    if (J[I] > Jmax)
+      Jmax = J[I];
+    I++;
+  }
+ 
+  //Print Table
+  var tableX = sheet.getLastColumn()+1;
+  var tableRange = sheet.getRange(2, tableX+1,4,6);
+  tableRange.setValues([["One Way ANOVA:","DF","SS","MS","F","P"],
+                        ["Factor",I-1,"","","",""],
+                        ["Error",N-I,"","","",""],
+                        ["Total",N-1,"","","",""]]);
+ 
+  //included above:
+  //calculate degrees of freedom (DF)
+  //sheet.getRange(2, tableX+2,3).setValues([[I-1],[N-I],[N-1]]);
+ 
+  var means = new Array(I);
+ 
+  //calculate sum of squares(SS) - values
+  var sumAllSquares = 0; //sum x_ij^2
+  var sumAllMeanSquares = 0;//sum J_i x(bar)_i^2
+  var sumMeanSquare = N*Math.pow(average_(sheet.getRange(2,1,Jmax,I)),2);//N*x(bar)^2
+  for(var i = 0; i<I;i++)
+  {
+    for (var j = 0; j<J[i];j++)
+    {
+      sumAllSquares += Math.pow(sheet.getRange(j+2, i+1).getValue(),2);
+    }
+    means[i] = average_(sheet.getRange(2,i+1,J[i]));
+    sumAllMeanSquares += J[i]*Math.pow(means[i],2);
+  }
+ 
+  //calculate sum of squares(SS) - Factor, Error, Total
+  var SSTr = sumAllMeanSquares - sumMeanSquare;
+  var SSE = sumAllSquares - sumAllMeanSquares;
+  var SStot = SSTr + SSE;
+  tableRange.getCell(2,3).setValue(SSTr);
+  tableRange.getCell(3,3).setValue(SSE);
+  tableRange.getCell(4,3).setValue(SStot);
+  //replaced above:
+  //sheet.getRange(2, tableX+3,3).setValues([[SSTr],[SSE],[SStot]]);
+ 
+  //calculate Mean Square (MS)
+  var MSTr = SSTr / (I-1);
+  var MSE = SSE / (N-I);
+  tableRange.getCell(2,4).setValue(MSTr);
+  tableRange.getCell(3,4).setValue(MSE);
+  //replaced above:
+  //sheet.getRange(2, tableX+4,2).setValues([[MSTr],[MSE]]);
+ 
+  //calculate F statistic
+  var F = MSTr / MSE;
+  tableRange.getCell(2,5).setValue(F);
+  //replaced above:
+  //sheet.getRange(2, tableX+5).setValue(F);
+ 
+  //calculate P value for null-Hypothesis
+  tableRange.getCell(2,6).setValue(Ftest(F, I-1, N-I));
+  //replaced above:
+  //sheet.getRange(2, tableX+6).setValue("?");//docs currently has no FDIST function
+ 
+  //Pairwise Comparisons:
+  sheet.getRange(7,tableX+1, 2, 9).setValues([["Pairwise Comparisons:", "", "Tukey-Kramer","","Bonferroni","","Fisher LSD","",""],
+                                              ["Factor 1", "Factor 2", "q", "P", "t", "P", "P","Range Min", "Range Max"]]);
+  var pairwiseRow = 9;
+  for (var i = 0; i<I; i++)
+  {
+    for(var j = i+1; j<I; j++)
+    {
+      sheet.getRange(pairwiseRow, tableX+1,1,2).setValues([[sheet.getRange(1,i+1).getValue(),
+                                                            sheet.getRange(1,j+1).getValue()]]);
+      sheet.getRange(pairwiseRow, tableX+3,1,2).setValues(tukeyKramer_(means[i], means[j], J[i], J[j], MSE, I, N));
+      sheet.getRange(pairwiseRow, tableX+5,1,2).setValues(bonferroni_(means[i], means[j], J[i], J[j], MSE, I, N));
+      sheet.getRange(pairwiseRow, tableX+7,1,3).setValues(fisherLSD_(means[i], means[j], J[i], J[j], MSE, I, N));
+      pairwiseRow++;
+    }
+  }
+}
+function tukeyKramer_(mean1, mean2, J1, J2, MSE, I, N)
+{
+  //SpreadsheetApp.getActiveSheet().getRange("A10").setValue(mean2);
+  var q = Math.abs(mean1 - mean2)/Math.pow(MSE/2.0*(1.0/J1+1.0/J2),0.5);
+  var values = [[q, qtest(q, I, N-I)]];
+  return values;
+}
+function bonferroni_(mean1, mean2, J1, J2, MSE, I, N)
+{
+  var t = Math.abs(mean1 - mean2)/Math.pow(MSE*(1.0/J1+1.0/J2),0.5);
+  var values = [[t, ttest(t, N-I)*I*(I-1)/2.0]];//all comparisons
+  return values;
+}
+function fisherLSD_(mean1, mean2, J1, J2, MSE, I, N)
+{
+  var t = Math.abs(mean1 - mean2)/Math.pow(MSE*(1.0/J1+1.0/J2),0.5);
+  var values = [[ttest(t, N-I),
+                 mean1 - mean2 - inverset(0.025,N-I)*Math.pow(MSE*(1.0/J1+1.0/J2),0.5),
+                 mean1 - mean2 + inverset(0.025,N-I)*Math.pow(MSE*(1.0/J1+1.0/J2),0.5) ]];
+  //note, P is individual, not simontanious
+  return values;
+}
+//Helper functions:
+function isCellEmpty_(cellData)
+{
+  return typeof(cellData) == "string" && cellData == "";
+}
+function average_(avRange)
+{
+  var sum = 0;
+  var number = 0;
+  var vals = avRange.getValues();
+  for (var i = 0; i<avRange.getWidth(); i++)
+  {
+    for (var j = 0; j<avRange.getHeight(); j++)
+    {
+      if (!isCellEmpty_(vals[j][i]))
+      {
+        sum += vals[j][i];
+        number++;
+      }
+    }
+  }
+  return 1.0*sum/number;
+}
+function qtest(q, df1, df2)
+{
+  return "?";
+}
+//The following functions ported from c++ courtesy of Bill Miller's OpenStat program:
+// http://statpages.org/miller/openstat/
+//Fisher F test
+function Ftest(f, DF1, DF2)
+{
+    var prob;
+    if (f < 0.0001)
+      return 1.0;
+    prob = betai_(0.5 * DF2, 0.5 * DF1, DF2 / (DF2 + DF1 * f));
+    if (prob > 1.0)
+      prob = 2.0 - prob;
+    return prob;
+}
+//----------------------------------------------------------------------------------------------
+function betai_(A, b, X)
+{
+    var bt;
+    if (X < 0.0 || X > 1.0)
+    {
+        //Application->MessageBox("Bad x in incomplete beta function - terminating","PROBLEM!",MB_OK);
+        return 0.0;
+    }
+    if (X == 0.0 || X == 1.0)
+      bt = 0.0;
+    else
+      bt = Math.exp(gammln_(A + b) - gammln_(A) - gammln_(b) + A * Math.log(X) + b * Math.log(1.0 - X));
+    if (X < (A + 1.0) / (A + b + 2.0) )
+      return (bt * betacf_(A, b, X) / A);
+    else
+      return (1.0 - bt * betacf_(b, A, 1.0 - X) / b);
+}
+//---------------------------------------------------------------------------------------------
+function betacf_(A, b, X)
+{
+    var d, em, ap, bp, app, bpp,aold, tem;
+    var itmax = 1000;
+    var eps = 0.0000003;
+    var am = 1.0;
+    var bm = 1.0;
+    var az = 1.0;
+    var qab = A + b;
+    var qap = A + 1.0;
+    var qam = A - 1.0;
+    var bz = 1.0 - qab * X / qap;
+    for (var M = 1; M <= itmax; M++)
+    {
+        em = M;
+        tem = em + em;
+        d = em * (b - M) * X / ((qam + tem) * (A + tem));
+        ap = az + d * am;
+        bp = bz + d * bm;
+        d = -(A + em) * (qab + em) * X / ((A + tem) * (qap + tem));
+        app = ap + d * az;
+        bpp = bp + d * bz;
+        aold = az;
+        am = ap / bpp;
+        bm = bp / bpp;
+        az = app / bpp;
+        bz = 1.0;
+        if (Math.abs(az - aold) < eps * Math.abs(az))
+          return az;
+    }
+    //Application->MessageBox ("a or b too big or itmax too small in betacf","PROBLEM!",MB_OK);
+    return az;
+}
+//------------------------------------------------------------------------------------------
+function gammln_(xx)
+{
+    var cof = [76.18009173, -86.50532033, 24.01409822, -1.231739516, 0.00120858003, -0.00000536382];
+    var X = xx - 1.0;
+    var tmp = X + 5.5;
+    tmp = tmp - ((X + 0.5) * Math.log(tmp));
+    var ser = 1.0;
+    for (var j = 0; j < 6; j++)
+    {
+        X = X + 1.0;
+        ser = ser + cof[j] / X;
+    }
+    return ( -tmp + Math.log(2.50662827465 * ser) );
+}
+//Studentized range statistic distribution function
+function qtest(q, r, v)
+{
+/* Yields the probability of a sample value of Q or larger from a population
+  with r means and degrees of freedom for the mean square error of v. */
+   var  probq;
+   if (v > 120.0)
+     v = 120.0;
+   probq = prtrng_(q,v,r);
+   if (probq < 0)
+   {
+     //Application->MessageBox("fault in calculating prob. of Student Range Q","ERROR!",MB_OK);
+     probq = 0.0;
+   }
+   probq = 1.0 - probq;
+   return(probq);
+}
+/* ----------------- Probability of student range ---------------------- */
+function prtrng_(q, v, r)
+/* algorith as 190 appl. Statistics, 1983, Vol.32, No.2
+  evaluates the probability from 0 to q for a studentized range having
+  v degrees of freedom and r samples. */
+{
+   var vw = new Array(31);
+   var qw = new Array(31);
+   var g, gmid, r1, c, h, v2, gstep, gk, pk, pk1, pk2, w0, pz;
+   var x, hj, ehj, pj;
+   var j, jj, jump, k;
+   var sumprob = 0.0;
+   var pcutj = 0.00003;
+   var pcutk = 0.0001;
+   var step = 0.45;
+   var vmax = 120.0;
+   var zero = 0.0;
+   var fifth = 0.2;
+   var half = 0.5;
+   var one = 1.0;
+   var two = 2.0;
+   var cv1 = 0.193064705;
+   var cv2 = 0.293525326;
+   var cvmax = 0.39894228;
+   var cv = [0, 0.318309886, -0.268132716e-2, 0.347222222e-2, 0.833333333e-1];
+   var jmin = 3;
+   var jmax = 13;
+   var kmin = 7;
+   var kmax = 15;
+   /* check initial values */
+   var ifault = 0;
+   if ((v < one) || (r < two))
+     ifault = 1;
+   if ((q >= zero) && (ifault == 0))
+   {  /* main body of function */
+     g = step * Math.pow(r,-fifth);
+     gmid = half * Math.log(r);
+     r1 = r - one;
+     c = Math.log(r * g * cvmax);
+     if (c <= vmax)
+     {
+       h = step * Math.pow(v,-half);
+       v2 = v * half;
+       if (v == one) c = cv1;
+       if (v == two) c = cv2;
+       if (! ((v == one) || (v == two))) c = Math.sqrt(v2) * cv[1] /
+         (one + ((cv[2] / v2 + cv[3]) / v2 + cv[4]) / v2);
+       c = Math.log(c * r * g * h);
+     }
+   /* compute integral.
+  Given a row k, the procedure starts at the midpoint and works outward
+  (index j) in calculating the probability at nodes symetric about the
+  midpoint.  The rows (index k) are also processed outwards symmetrically
+  about the midpoint.  The center row is unpaired. */
+     gstep = g;
+     qw[1] = -one;
+     qw[jmax + 1] = -one;
+     pk1 = one;
+     pk2 = one;
+     for (k = 1; k < kmax+1; ++k)
+     {
+       gstep = gstep - g;
+       do
+       {
+         gstep = -gstep;
+       gk = gmid + gstep;
+       pk = zero;
+    if ((pk2 > pcutk) || (k <= kmin))
+    {
+             w0 = c - gk * gk * half;
+             pz = alnorm_(gk,true);
+             x = alnorm_(gk - q,true) - pz;
+       if ((x > zero)) pk = Math.exp(w0 + r1 * Math.log(x));
+       if (v <= vmax)
+       {
+                jump = -jmax;
+         do
+         {
+    jump = jump + jmax;
+       for (j = 1;j < jmax+1; ++j)
+       {
+        jj = j + jump;
+        if (qw[jj] <= zero)
+        {
+           hj = h * j;
+           if (j < jmax) qw[jj + 1] = -one;
+           ehj = Math.exp(hj);
+           qw[jj] = q * ehj;
+           vw[jj] = v * (hj + half - ehj * ehj * half);
+        }
+        pj = zero;
+        x = alnorm_(gk - qw[jj],true) - pz;
+        if (x > zero) pj = Math.exp(w0 + vw[jj] + r1 * Math.log(x));
+        pk = pk + pj;
+        if (pj <= pcutj)
+        {
+            if((jj > jmin) || (k > kmin))
+              break;
+        }
+       } /* for j = 1 to jmax */
+         h = -h;
+       }while (h < zero);
+      } /* if v less than or equal vmax */
+    }  /* if pk2 > pcutk or k <= kmin */
+    sumprob = sumprob + pk;
+    if ((k <= kmin) || (pk > pcutk) || (pk1 > pcutk))
+    {
+           pk2 = pk1;
+           pk1 = pk;
+    }
+  }while(((k <= kmin) || (pk > pcutk) || (pk1 > pcutk))&& gstep > zero);
+  }   /* for k = 1 to kmax */
+   }; /* main body of function */
+   if (ifault == 0) return(sumprob);
+   else return(-1.0);
+}
+ 
+function alnorm_(x, upper)
+{
+/* algorithm AS 66 from Applied Statistics, 1973, Vol. 22, No.3, pg.424-427 */
+var y;
+var altemp;
+     var ltone = 7.0;
+     var utzero = 18.66;
+     var zero = 0.0;
+     var half = 0.5;
+     var one = 1.0;
+     var con = 1.28;
+     var up = upper;
+     var z = x;
+  if (z < zero)
+  {
+    up = (! up);
+    z = -z;
+  }
+  if ((z <= ltone) || (up) && (z <= utzero))
+  {
+    y = half * z * z;
+    if (z > con)
+    {
+               altemp = 0.398942280385 * Math.exp(-y) /
+               (z - 3.8052e-8 + 1.00000615302 /
+               (z + 3.98064794e-4 + 1.98615381364 /
+               (z - 0.151679116635 + 5.29330324926 /
+               (z + 4.8385912808 - 15.1508972451 /
+               (z + 0.742380924027 + 30.789933034 /
+               (z + 3.99019417011))))));
+    }
+          else altemp = half - z * (0.398942280444 - 0.399903438504 * y /
+               (y + 5.75885480458 - 29.8213557808 /
+               (y + 2.62433121679 + 48.6959930692 /
+               (y + 5.92885724438))));
+  }
+     else altemp = zero;
+  if (! up) altemp = one - altemp;
+  return(altemp);
+}
+function inverset(Probt, DF)
+{
+    // Returns the t value corresponding to a two-tailed t test probability.
+    var z = inversez(Probt);
+    var W = z * ((8.0 * DF + 3.0) / (1.0 + 8.0 * DF));
+    var tValue = Math.sqrt(DF * (Math.exp(W * W / DF) - 1.0));
+    //if (Probt < 0.5) tValue = -tValue;
+    return tValue;
+}
+function inversez(prob)
+{
+  // obtains the inverse of z, that is, the z for a probability associated
+    // with a normally distributed z score.
+        var flag;
+        var p = prob;
+        if (prob > 0.5) p = 1.0 - prob;
+        var z = zprob_(p,flag);
+        if (prob > 0.5) z = Math.abs(z);
+        return z;
+} //End of inversez Function
+function zprob_(p, errorstate)
+{
+  // value of probability between approx. 0 and .5 entered in p and the
+    // z value is returned  z
+     var z, Y;
+     errorstate = true;
+     var lim = 0.0000000000001;
+     var p0 = -0.322232431088;
+     var p1 = -1.0;
+     var p2 = -0.342242088547;
+     var p3 = -0.0204231210245;
+     var p4 = -4.53642210148E-05;
+     var q0 = 0.099348462606;
+     var q1 = 0.588581570495;
+     var q2 = 0.531103462366;
+     var q3 = 0.10353775285;
+     var q4 = 0.0038560700634;
+     var xp = 0.0;
+     if (p > 0.5) p = 1 - p;
+     if (p < lim) z = xp;
+     else
+     {
+          errorstate = false;
+          if (p == 0.5) z = xp;
+          else
+          {
+               Y = Math.sqrt(Math.log(1.0 / (p * p)));
+               xp = Y + ((((Y * p4 + p3) * Y + p2) * Y + p1) * Y + p0) /((((Y * q4 + q3) * Y + q2) * Y + q1) * Y + q0);
+               if (p < 0.5) xp = -xp;
+               z = xp;
+          }
+     }
+     return z;
+}  // End function zprob
+//End OpenStat
+function ttest(t, DF)
+{
+    // Returns the probability corresponding to a two-tailed t test.
+    return Ftest (t*t, 1.0, DF);
+}
+//Help functions
+function helpDialog_()
+{
+  Browser.msgBox("For Help and Development, please visit http://sites.google.com/site/docstatistics/");
+}
